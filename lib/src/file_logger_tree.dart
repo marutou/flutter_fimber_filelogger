@@ -27,7 +27,11 @@ class FileLoggerTree extends LogTree {
 
   /// The number of days to keep the log files onto the disk
   /// If you want to disable the auto-clean mechanism, just pass a null value
-  final int numberOfDays;
+  final int? numberOfDays;
+
+  /// The size of file (mb) to keep the log files onto the disk
+  /// If you want to disable the auto-clean mechanism, just pass a null value
+  final int? maxSize;
 
   /// The format for each file (eg: yyyy-MM-dd => 2019-08-24.log)
   final String fileDateFormat;
@@ -57,14 +61,14 @@ class FileLoggerTree extends LogTree {
   FileLoggerTree(
       {this.levels = FileLoggerLevels.ALL,
       this.numberOfDays = 1,
+      this.maxSize = null,
       this.logDateFormat = 'MM/dd/yyyy HH:mm:ss',
       this.fileDateFormat = 'yyyy-MM-dd',
       String? locale})
-      : assert(levels != null),
-        assert(numberOfDays == null || numberOfDays >= 1,
+      : assert(numberOfDays == null || numberOfDays >= 1,
             'The number of days must be null (auto-clean disabled) or >= 1'),
-        assert(logDateFormat != null),
-        assert(fileDateFormat != null),
+        assert(maxSize == null || maxSize >= 1,
+            'The max size must be null (max-size disabled) or >= 1'),
         _lock = Lock(),
         _buffer = StringBuffer();
 
@@ -72,7 +76,14 @@ class FileLoggerTree extends LogTree {
   Directory? get directory => _directory;
 
   Future<void> _init() async {
-    String baseDirPath = (await getApplicationDocumentsDirectory()).path;
+    String baseDirPath;
+    if (Platform.isAndroid) {
+      baseDirPath = (await getExternalStorageDirectory())!.path;
+    } else if (Platform.isIOS) {
+      baseDirPath = (await getApplicationDocumentsDirectory()).path;
+    } else {
+      throw Exception('Platform is not support');
+    }
     baseDirPath = '$baseDirPath/';
 
     _directory = Directory(path.join(baseDirPath, 'logs'));
@@ -88,7 +99,7 @@ class FileLoggerTree extends LogTree {
       DateTime now = DateTime.now();
 
       DateTime minDate = DateTime(now.year, now.month, now.day)
-          .subtract(Duration(days: numberOfDays - 1));
+          .subtract(Duration(days: numberOfDays! - 1));
 
       for (FileSystemEntity file in files) {
         DateTime date =
@@ -101,8 +112,46 @@ class FileLoggerTree extends LogTree {
     }
 
     _fileDate = DateTime.now();
-    _file = File(
-        path.join(_directory!.path, '${_fileDateFormat.format(_fileDate!)}.log'));
+
+    int fileIndex = 0;
+    //get the list of files
+    List<FileSystemEntity> files =
+        await FileLoggerUtils.listDirContentsAsync(_directory!);
+
+    if (files.isNotEmpty) {
+      //this map method will return a list of exist index of "today file"
+      List<int> indexList = files.map((FileSystemEntity file) {
+        //split name file and index. Format: [fileName_index]
+        //0: file name
+        //1: index
+        List<String> fileNameIndex =
+            path.basenameWithoutExtension(file.path).split('_');
+        if (fileNameIndex[0] == '${_fileDateFormat.format(_fileDate!)}') {
+          int index = 0;
+          try {
+            index = int.parse(fileNameIndex[1]);
+          } catch (e) {}
+          return index;
+        } else {
+          //if file isn't "today file", don't get index, return 0 mean it will not effect other "today file"
+          return 0;
+        }
+      }).toList();
+      indexList.sort();
+      //get the max index (the current index)
+      fileIndex = indexList.last;
+    }
+
+    _file = File(path.join(_directory!.path,
+        '${_fileDateFormat.format(_fileDate!)}_$fileIndex.txt'));
+    if (this.maxSize == null) {
+      return;
+    }
+    //if file > 1MB create new file with index = index + 1
+    if (_file.existsSync() && _file.lengthSync() > maxSize! * 1000000) {
+      _file = File(path.join(_directory!.path,
+          '${_fileDateFormat.format(_fileDate!)}_${fileIndex + 1}.txt'));
+    }
   }
 
   @override
@@ -130,8 +179,8 @@ class FileLoggerTree extends LogTree {
     });
   }
 
-  String _getLog(
-      String? tag, String level, String msg, Object? ex, StackTrace? stacktrace) {
+  String _getLog(String? tag, String level, String msg, Object? ex,
+      StackTrace? stacktrace) {
     _buffer.clear();
 
     _buffer.write(_formattedDateTime);
